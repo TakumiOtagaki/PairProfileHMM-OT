@@ -2,120 +2,76 @@ from modules.pairHMM import PairProfileHMM
 import numpy as np
 import matplotlib.pyplot as plt
 import ot
-from collections import Counter
+import sys
+import pandas as pd
+
+LARGE_NUMBER = 1e20
 
 # main
 alphabets = ['A', 'C', 'G', 'T']  # 0, 1, 2, 3
 parameters = {  # parameters for PairProfileHMM
-    'w_D': 0.05,
-    'w_I': 0.05,
-    'gamma': 0.5,
+    'w_D': 0.1,
+    'w_I': 0.1,
+    'gamma': 0.3,
     'alpha_D': 0.1,
     'alpha_I': 0.1,
-    'beta_D': 0.2,
-    'beta_I': 0.2
+    'beta_D': 0.3,
+    'beta_I': 0.3,
+    'Match_per_mismatch': 20
 }
 
 
-def main():
-    # x_seq = "GGTTGGCCCCTTTGGTT"
-    # y_seq = "TTGGGTTTTC"
-
-    # x_seq = 'AAACGTTTTGTT'
-    # y_seq = 'ACGTACGTT'
-    # x_seq = "AATAATAATGAAT"
-    # y_seq = "AATAATGAATGAAT"
-
-    # x_seq = "AGTAGTCC"
-    # y_seq = "CCAGTCCAGTCC"
-
-    # x_seq = "AGTAGTCCCC"
-    # y_seq = "CCAGTCCAGT"
-
-    # x_seq = "TTGAACCCCCCCAGT"
-    # y_seq = "AAGTTCCCCCAGT"
-
-    x_seq = "AATAACGTAAT"
-    y_seq = "CGTAATAATGCAAT"
-
-    # 長い方を x に、短い方を y に
-    x_seq, y_seq = (x_seq, y_seq) if len(
-        x_seq) >= len(y_seq) else (y_seq, x_seq)
-    # Calculate character frequencies
-    x_freq = Counter(x_seq)
-    y_freq = Counter(y_seq)
-
-    # Define probability vectors for x and y sequences based on character frequencies
-    a = np.array([x_freq[char] / len(x_seq) for char in x_seq])
-    b = np.array([y_freq[char] / len(y_seq) for char in y_seq])
-
+def OT_on_pairHMM(x_seq, y_seq, parameters, alphabets):
     pairHMM = PairProfileHMM(alphabets=alphabets, **parameters)
 
-    logp_ij = pairHMM.logp_ij_matrix(x_seq, y_seq)
-    print("logp_ij")
-    print(logp_ij)
-
-    # print on graph
-    plt.imshow(- logp_ij, cmap='hot', interpolation='nearest')
-    plt.xlabel('y')
-    plt.ylabel('x')
-    plt.title('- log(P(x_i, y_j)) : distance on OT')
-    # 軸に seq を表示
-    plt.xticks(np.arange(len(y_seq)), list(y_seq))
-    plt.yticks(np.arange(len(x_seq)), list(x_seq))
-    plt.colorbar()
-
-    plt.savefig(
-        "/Users/ootagakitakumi/Library/Mobile Documents/com~apple~CloudDocs/大学院/森下研究室/sequence_similarity/figures/pairHMM.png")
+    Match_logp = pairHMM.logp_ij_Match_matrix(x_seq, y_seq)  # matrix
+    Deletion_logp = pairHMM.logp_ij_Deletion_matrix(
+        x_seq, y_seq)  # vector, len = len(x_seq)
+    Insertion_logp = pairHMM.logp_ij_Insertion_matrix(
+        x_seq, y_seq)  # vector, len = len(y_seq)
 
     # Optimal Transport
     n1, n2 = len(x_seq), len(y_seq)
-    a = np.ones(len(x_seq))
-    b = np.ones(len(y_seq))
+    n = n1 + n2
+    a = np.ones(n)
+    b = np.ones(n)
     a = a / np.sum(a)
     b = b / np.sum(b)
-    M = - logp_ij
-    print(M)
-    print(len(a), len(b))
-    # M is len(x_seq) x len(y_seq)
-    if len(a) > len(b):
-        d = len(a) - len(b)
-        b = np.concatenate((b, np.zeros(d)), axis=0)
-        y_seq += ' ' * d
-        M = np.pad(M, ((0, 0), (0, d)), 'constant', constant_values=np.inf)
-    elif len(a) < len(b):
-        d = len(b) - len(a)
-        a = np.concatenate((a, np.zeros(d)), axis=0)
-        y_seq += ' ' * d
-        M = np.pad(M, ((0, d), (0, 0)), 'constant',
-                   constant_values=np.inf)
+    M = np.zeros((n1 + n2, n1 + n2))
+    T = int(n * 0.8)
+    M[:n1, :n2] = - Match_logp
+    M[n1:, :n2] = - Insertion_logp
+    M[:n1, n2:] = - Deletion_logp.T
+    # M[n1:, n2:] は -Insertion_lopg と -Deletion_logp の全体で見た最小値にしておく。それは -Match_logp の max よりも大きい
+    M[n1:, n2:] = - max(np.min(Insertion_logp), np.min(Deletion_logp))
 
+    M[T:n, T:n] = 0
+    if -max(np.min(Insertion_logp), np.min(Deletion_logp)) < -np.max(Match_logp):
+        print("Warning: M[n1:, n2:] is smaller than M[:n1, :n2]")
     # M に含まれる - np.inf を 大きな数に変換
-    print(M.shape)
-    print(a.shape, b.shape)
-    M[M == np.inf] = 1e20
+    print("M: \n", pd.DataFrame(M))
+
+    # sys.exit()
+    M[M == np.inf] = LARGE_NUMBER
     # P = ot.emd(a, b, M)
     P = ot.emd(a, b, M)
-    print(P)
-    # EMDistance
-    dist = np.sum(P * M)
 
     # Plot the transport plan
     fig, ax = plt.subplots(figsize=(10, 8))
 
     # Plot connections based on the transport plan matrix P
-    for i in range(len(a)):
-        for j in range(len(b)):
+    for i in range(n):
+        for j in range(n):
             if P[i, j] > 0:
                 ax.plot([0, 1], [i, j], lw=P[i, j] * 10,
                         color=plt.cm.viridis(P[i, j] / P.max()))
 
     # Add labels for the sequences
-    for i, char in enumerate(x_seq):
+    for i, char in enumerate(x_seq + "-" * n2):
         ax.text(-0.1, i, char, horizontalalignment='right',
                 fontsize=12, color='red')
 
-    for j, char in enumerate(y_seq):
+    for j, char in enumerate(y_seq + "-" * n1):
         ax.text(1.1, j, char, horizontalalignment='left',
                 fontsize=12, color='blue')
 
@@ -125,11 +81,10 @@ def main():
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax)
     cbar.set_label('Transport Amount')
-    print("HI")
+
     # Add percentage of transport amount
-    for i in range(n1):
-        for j in range(n2):
-            print(f"i, j, P[i, j] = {i}, {j}, {P[i, j]}")
+    for i in range(n):
+        for j in range(n):
             if a[i] > 1e-5 and P[i, j] / a[i] > 1e-2:
                 mid = (i + j) / 2
                 mid += 0.2 * (j - i) + np.sign(j - i) * 0.1
@@ -143,6 +98,40 @@ def main():
     ax.set_title('Optimal Transport Plan')
     fig.savefig(
         "/Users/ootagakitakumi/Library/Mobile Documents/com~apple~CloudDocs/大学院/森下研究室/sequence_similarity/figures/optimal_transport.png")
+    return P, M
+
+
+def main():
+    # indel について--> 全然ダメ仕方ない。indel をグラフで表現できないようにしているから。
+    # x_seq = "ACGTGCA"
+    # y_seq = "ACGCA"
+
+    # リピート
+    # x_seq = "ACGTACGT"
+    # y_seq = "ACGTACGTACGT"
+
+    # indel が交互にはいる
+    x_seq = 'ACTACTAGG'
+    y_seq = 'ACCTAGATGATGG'
+
+    # ミスマッチ
+    # x_seq = "AATGCA"
+    # y_seq = "AATGTA"
+
+    # x_seq = "AGTAGTCC"
+    # y_seq = "CCAGTCCAGTCC"
+
+    # x_seq = "AGTAGTCCCC"
+    # y_seq = "CCAGTCCAGT"
+
+    # x_seq = "TTGAACCCCCCCAGT"
+    # y_seq = "AAGTTCCCCCAGT"
+
+    pairHMM = PairProfileHMM(alphabets=alphabets, **parameters)
+
+    P, M = OT_on_pairHMM(x_seq, y_seq, parameters, alphabets)
+
+    print("OT cost = ", np.sum(P * M))
 
 
 if __name__ == '__main__':
